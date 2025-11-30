@@ -1,0 +1,10 @@
+property_id,building_type,construction_year,floors,replacement_value_kEUR,water_depth_m,DR_pred,DR_obs
+1,residential,1985,2,300,0.10,0.03,0.02
+2,residential,2005,1,250,0.80,0.28,0.30
+3,residential,1975,2,280,1.40,0.45,0.50
+4,commercial,1998,1,650,0.60,0.20,0.18
+5,commercial,2010,1,800,1.20,0.40,0.35
+6,industrial,1990,1,1200,1.80,0.55,0.60
+7,residential,1965,2,220,0.20,0.08,0.05
+8,industrial,2008,1,1500,0.90,0.30,0.32
+9,commercial,2003,1,700,0.40,0.15,0.12
