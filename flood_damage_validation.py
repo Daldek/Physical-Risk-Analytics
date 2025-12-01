@@ -1,6 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-Flood damage validation.
+Flood damage model validation tools.
+
+This module provides an object-oriented framework for validating
+predicted damage ratios and financial losses against observed data.
+
+Includes:
+- loading validation data from CSV,
+- computing global performance metrics (MAE, RMSE, Bias),
+- evaluating a mean-based baseline model,
+- calculating financial loss metrics,
+- segment-level analysis,
+- basic visualization of model fit.
 """
 
 import os
@@ -8,6 +19,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
+
 
 class ValidationDataset:
     """Keeps validation data for flood damage assessment."""
@@ -76,6 +88,7 @@ class ValidationDataset:
                 f"'{self.prediction_column}' or '{self.observed_column}'."
             )
 
+
 class FloodDamageValidator:
     """
     Validator for flood damage ratio predictions.
@@ -103,9 +116,10 @@ class FloodDamageValidator:
             RMSE (root mean squared error),
             and Bias (pred - obs, positive = overestimation)
         """
+        df = self.dataset.df
         
-        dr_pred = self.dataset.df[self.dataset.prediction_column].values
-        dr_obs = self.dataset.df[self.dataset.observed_column].values
+        dr_pred = df[self.dataset.prediction_column].to_numpy()
+        dr_obs = df[self.dataset.observed_column].to_numpy()
         
         errors = dr_pred - dr_obs
         mae = np.mean(np.abs(errors))
@@ -119,50 +133,56 @@ class FloodDamageValidator:
         }
     
     def compute_loss_metrics(self, value_col="replacement_value_kEUR"):
-            """
-            Compute performance metrics for financial losses
+        """
+        Compute performance metrics for financial losses.
 
-            Parameters
-            ----------
-            value_col : str, optional
-                Name of the column with asset replacement values (e.g. in kEUR),
-                by default "replacement_value_kEUR".
+        Parameters
+        ----------
+        value_col : str, optional
+            Name of the column with asset replacement values (e.g. in kEUR),
+            by default "replacement_value_kEUR".
 
-            Returns
-            -------
-            dict
-                Dictionary with the following keys:
-                - "MAE_loss"
-                - "RMSE_loss"
-                - "Bias_loss"
+        Returns
+        -------
+        dict
+            Dictionary with the following keys:
+            - "MAE_loss"
+            - "RMSE_loss"
+            - "Bias_loss"
 
-            Raises
-            ------
-            ValueError
-                If `value_col` is not present in the dataset.
-            """
-            df = self.dataset.df
+        Raises
+        ------
+        ValueError
+            If 'value_col' is not present in the dataset.
+        """
+        df = self.dataset.df  # converts "dataset" attribute to dataframe
 
-            if value_col not in df.columns:
-                raise ValueError(f"Column '{value_col}' not found in dataset.")
+        if value_col not in df.columns:
+            raise ValueError(f"Column '{value_col}' not found in dataset.")
+        
+        df = df.dropna(
+            subset=[self.dataset.prediction_column,
+                    self.dataset.observed_column,
+                    value_col]
+        )
 
-            dr_pred = self.dataset.df[self.dataset.prediction_column].to_numpy()
-            dr_obs = self.dataset.df[self.dataset.observed_column].to_numpy()
-            values = df[value_col].to_numpy()
+        dr_pred = df[self.dataset.prediction_column].to_numpy()
+        dr_obs = df[self.dataset.observed_column].to_numpy()
+        values = df[value_col].to_numpy()  # "value_col" is not a name of the class attribute
 
-            loss_pred = dr_pred * values
-            loss_obs = dr_obs * values
+        loss_pred = dr_pred * values
+        loss_obs = dr_obs * values
 
-            errors = loss_pred - loss_obs
-            mae_loss = np.mean(np.abs(errors))
-            rmse_loss = np.sqrt(np.mean(errors ** 2))
-            bias_loss = np.mean(errors)
+        errors = loss_pred - loss_obs
+        mae_loss = np.mean(np.abs(errors))
+        rmse_loss = np.sqrt(np.mean(errors ** 2))
+        bias_loss = np.mean(errors)
 
-            return {
-                "MAE_loss": mae_loss,
-                "RMSE_loss": rmse_loss,
-                "Bias_loss": bias_loss,
-            }
+        return {
+            "MAE_loss": mae_loss,
+            "RMSE_loss": rmse_loss,
+            "Bias_loss": bias_loss,
+        }
 
     def compute_segment_means(self, segment_col):
         """
@@ -194,35 +214,71 @@ class FloodDamageValidator:
         
         return grouped.round(3)
    
+    def compute_baseline_metrics(self):
+        """
+        Compute baseline metrics using mean observed damage ratio as prediction.
+
+        Returns
+        -------
+        dict
+            Dictionary containing MAE, RMSE, and Bias for the baseline model. Keys are:
+            - "MAE_baseline"
+            - "RMSE_baseline"
+            - "Bias_baseline"
+        """
+        df = self.dataset.df
+        
+        dr_obs = df[self.dataset.observed_column].to_numpy()
+        dr_pred_baseline = np.full_like(dr_obs, np.mean(dr_obs))  # new array with constant values equal to mean observed DR
+        
+        errors = dr_pred_baseline - dr_obs
+        mae_baseline = np.mean(np.abs(errors))
+        rmse_baseline = np.sqrt(np.mean(errors ** 2))
+        bias_baseline = np.mean(errors)
+        
+        return {
+            "MAE_baseline": mae_baseline,
+            "RMSE_baseline": rmse_baseline,
+            "Bias_baseline": bias_baseline,
+        }
+   
     def plot_scatter(self):
         """
         Create a scatter plot comparing predicted vs observed damage ratios
         using seaborn for better visual styling.
         """
         df = self.dataset.df
+        
         dr_pred = df[self.dataset.prediction_column]
         dr_obs = df[self.dataset.observed_column]
 
         plt.figure(figsize=(6, 6))
         sns.set_style("whitegrid")
-
-        # seaborn scatter
-        sns.scatterplot(x=dr_obs, y=dr_pred, color="steelblue", s=70)
         
         # determine max value and round it up to the next 0.1
         raw_max = max(dr_obs.max() + 0.05, dr_pred.max() + 0.05)
         range_max = np.ceil(raw_max * 10) / 10.0
-
+        
         # diagonal reference line starting at (0,0)
         plt.plot([0, range_max], [0, range_max],
                 linestyle="--", color="red", label="1:1 line")
 
+        # seaborn scatter
+        sns.scatterplot(
+            data=df,
+            x=self.dataset.observed_column,
+            y=self.dataset.prediction_column,
+            hue="building_type",
+            palette="Set2",
+            s=70
+        )
+        
         # enforce axes starting at 0 and having the same range
         plt.xlim(0, range_max)
         plt.ylim(0, range_max)
 
-        plt.xlabel("Observed DR")
-        plt.ylabel("Predicted DR")
+        plt.xlabel("Observed Damage Ratio")
+        plt.ylabel("Predicted Damage Ratio")
         plt.title("Predicted vs Observed Damage Ratios")
         plt.legend()
 
@@ -243,6 +299,15 @@ class FloodDamageValidator:
         print(f"MAE            : {metrics['MAE']:.3f}")
         print(f"RMSE           : {metrics['RMSE']:.3f}")
         print(f"Bias (pred-obs): {metrics['Bias']:.3f}")
+        
+        if metrics['MAE'] < 0.05:
+            quality = "very good"
+        elif metrics['MAE'] < 0.10:
+            quality = "moderate"
+        else:
+            quality = "poor"
+        
+        print(f"Model fit (based on MAE): {quality}")
 
     @staticmethod
     def print_loss_summary(loss_metrics):
@@ -252,12 +317,41 @@ class FloodDamageValidator:
         Parameters
         ----------
         loss_metrics : dict
-            Dictionary as returned by `compute_loss_metrics`.
+            Dictionary as returned by 'compute_loss_metrics'.
         """
-        print("\nFinancial loss validation")
-        print(f"MAE loss      : {loss_metrics['MAE_loss']:.3f}")
-        print(f"RMSE loss     : {loss_metrics['RMSE_loss']:.3f}")
-        print(f"Bias loss     : {loss_metrics['Bias_loss']:.3f}")
+        print("\nFinancial loss validation:")
+        print(f"MAE loss       : {loss_metrics['MAE_loss']:.3f}")
+        print(f"RMSE loss      : {loss_metrics['RMSE_loss']:.3f}")
+        print(f"Bias loss      : {loss_metrics['Bias_loss']:.3f}")
+
+    @staticmethod
+    def print_baseline_summary(baseline_metrics, model_metrics=None):
+        """
+        Print a summary of baseline performance metrics.
+
+        Parameters
+        ----------
+        baseline_metrics : dict
+            Metrics dictionary as returned by 'compute_baseline_metrics'.
+        model_metrics : dict, optional
+            Metrics for the main model (from 'compute_metrics'), used to
+            show relative improvement in MAE if provided.
+        """
+
+        print("\nGlobal baseline metrics (constant DR = mean observed)")
+        print(f"Baseline MAE   : {baseline_metrics['MAE_baseline']:.3f}")
+        print(f"Baseline RMSE  : {baseline_metrics['RMSE_baseline']:.3f}")
+        print(f"Baseline Bias  : {baseline_metrics['Bias_baseline']:.3f}")
+
+        if model_metrics is not None and "MAE" in model_metrics:
+            mae_model = model_metrics["MAE"]
+            if baseline_metrics['MAE_baseline'] > 0:
+                improvement = (1.0 - mae_model / baseline_metrics['MAE_baseline']) * 100.0
+                if improvement < 0:
+                    print(f"Model performs worse than baseline by {abs(improvement):.1f}%.")
+                else:
+                    print(f"MAE improvement vs baseline: {improvement:.1f}%.")
+
 
 if __name__ == "__main__":
     # Example usage
@@ -270,7 +364,9 @@ if __name__ == "__main__":
     
     # Damage-ratio metrics
     metrics = validator.compute_metrics()
-    FloodDamageValidator.print_performance_summary(metrics)
+    baseline_metrics = validator.compute_baseline_metrics()
+    validator.print_baseline_summary(baseline_metrics, model_metrics=metrics)
+    validator.print_performance_summary(metrics)
     
     # Financial loss metrics
     loss_metrics = validator.compute_loss_metrics("replacement_value_kEUR")
