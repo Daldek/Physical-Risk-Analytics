@@ -3,13 +3,12 @@
 Flood damage model validation tools.
 
 This module provides an object-oriented framework for validating
-predicted damage ratios and financial losses against observed data.
+predicted damage ratios against observed data.
 
 Includes:
 - loading validation data from CSV,
 - computing global performance metrics (MAE, RMSE, Bias),
 - evaluating a mean-based baseline model,
-- calculating financial loss metrics,
 - segment-level analysis,
 - basic visualization of model fit.
 """
@@ -104,6 +103,131 @@ class FloodDamageValidator:
     
     def __init__(self, dataset):
         self.dataset = dataset
+        
+        # basic data checks
+        self.check_model_damage_range()
+    
+    def check_model_damage_range(self, id_col="property_id"):
+        """
+        Check that damage-ratio values lie in [0.0, 1.0].
+
+        - Only the 'DR_pred' column is checked.
+        - Values outside [0.0, 1.0] or NaN are removed.
+        - If any rows are removed, prints how many and lists the removed property_id's.
+        - If nothing is removed, remains silent.
+        - Updates self.dataset.df.
+
+        Parameters
+        ----------
+        id_col : str, optional
+            Column name identifying unique objects (default: 'property_id').
+
+        Raises
+        ------
+        ValueError
+            If 'DR_pred' or id_col are missing from the dataset.
+        """
+
+        df = self.dataset.df
+
+        # required columns
+        pred_col = self.dataset.prediction_column  # should be 'DR_pred'
+        missing = [c for c in (pred_col, id_col) if c not in df.columns]
+        if missing:
+            raise ValueError(f"Missing required column(s): {', '.join(missing)}")
+
+        # valid mask: DR_pred not NaN and in [0, 1]
+        valid_mask = df[pred_col].notna() & (df[pred_col] >= 0.0) & (df[pred_col] <= 1.0)
+
+        # offending rows = NOT valid
+        offending_mask = ~valid_mask
+        n_offending = int(offending_mask.sum())
+
+        if n_offending > 0:
+            removed_ids = df.loc[offending_mask, id_col].astype(str).tolist()
+
+            # remove invalid rows
+            self.dataset.df = df.loc[valid_mask].reset_index(drop=True)
+
+            print(
+                f"[WARNING] Removed {n_offending} invalid row(s) in '{pred_col}' "
+                f"(outside [0.0, 1.0] or NaN). Removed {id_col}: {removed_ids}"
+            )
+
+        # if none removed, remain silent
+        return n_offending
+    
+    def check_monotonicity(self, depth_col="water_depth_m"):
+        """
+            Check whether observed damage ratios increase with flood depth.
+
+            This method provides two checks:
+            
+            1. Correlation between flood depth and observed damage ratio.
+            A positive value indicates that deeper flooding corresponds to 
+            higher damage ratios.
+            
+            2. Predefined depth-bin stratification:
+                Bins:
+                    - 0–0.2 m
+                    - 0.2–0.5 m
+                    - 0.5–1.0 m
+                    - 1.0–1.5 m
+                    - > 1.5 m
+
+                The mean observed damage ratio is computed for each bin.
+
+            Parameters
+            ----------
+            depth_col : str, optional
+                Name of the column representing flood depth. 
+                Default is "water_depth_m".
+            
+            Returns
+            -------
+            dict
+                Dictionary containing:
+                - "correlation" : float
+                    Pearson correlation coefficient depth to damage ratio.
+                - "depth_bin_means" : pandas.Series
+                    Mean observed damage ratio for each bin.
+
+            Raises
+            ------
+            ValueError
+                If 'depth_col' is missing from the dataset.
+        """
+        df = self.dataset.df
+
+        if depth_col not in df.columns:
+            raise ValueError(f"Column '{depth_col}' not found in dataset.")
+        
+        # https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.corr.html
+        corr = df[depth_col].corr(df[self.dataset.observed_column])
+        
+        bins = [0.0, 0.2, 0.5, 1.0, 1.5, float("inf")]
+        labels = ["0-0.2", "0.2-0.5", "0.5-1.0", "1.0-1.5", ">1.5"]
+
+        # https://pandas.pydata.org/docs/reference/api/pandas.cut.html
+        df["_depth_bin"] = pd.cut(  # Convert continuous depths into predefined bins
+            df[depth_col],
+            bins=bins,
+            labels=labels,
+            include_lowest=True
+        )
+
+        depth_bin_means = (
+            df.groupby("_depth_bin", observed=True)[self.dataset.observed_column]
+            .mean()
+        )
+
+        # remove temp column
+        df.drop(columns=["_depth_bin"], inplace=True)
+
+        return {
+            "correlation": corr,
+            "depth_bin_means": depth_bin_means.round(3)
+        }
     
     def compute_metrics(self):
         """
@@ -132,61 +256,9 @@ class FloodDamageValidator:
             "Bias": bias,
         }
     
-    def compute_loss_metrics(self, value_col="replacement_value_kEUR"):
+    def compute_segment_metrics(self, segment_col):
         """
-        Compute performance metrics for financial losses.
-
-        Parameters
-        ----------
-        value_col : str, optional
-            Name of the column with asset replacement values (e.g. in kEUR),
-            by default "replacement_value_kEUR".
-
-        Returns
-        -------
-        dict
-            Dictionary with the following keys:
-            - "MAE_loss"
-            - "RMSE_loss"
-            - "Bias_loss"
-
-        Raises
-        ------
-        ValueError
-            If 'value_col' is not present in the dataset.
-        """
-        df = self.dataset.df  # converts "dataset" attribute to dataframe
-
-        if value_col not in df.columns:
-            raise ValueError(f"Column '{value_col}' not found in dataset.")
-        
-        df = df.dropna(
-            subset=[self.dataset.prediction_column,
-                    self.dataset.observed_column,
-                    value_col]
-        )
-
-        dr_pred = df[self.dataset.prediction_column].to_numpy()
-        dr_obs = df[self.dataset.observed_column].to_numpy()
-        values = df[value_col].to_numpy()  # "value_col" is not a name of the class attribute
-
-        loss_pred = dr_pred * values
-        loss_obs = dr_obs * values
-
-        errors = loss_pred - loss_obs
-        mae_loss = np.mean(np.abs(errors))
-        rmse_loss = np.sqrt(np.mean(errors ** 2))
-        bias_loss = np.mean(errors)
-
-        return {
-            "MAE_loss": mae_loss,
-            "RMSE_loss": rmse_loss,
-            "Bias_loss": bias_loss,
-        }
-
-    def compute_segment_means(self, segment_col):
-        """
-        Compute mean predicted and observed damage ratios per segment.
+        Compute MAE, RMSE and Bias per segment (category).
         
         Parameters
         ----------
@@ -196,7 +268,10 @@ class FloodDamageValidator:
         Returns
         -------
         pandas.DataFrame
-            Mean DR_pred and DR_obs for each value of 'segment_col'.
+            DataFrame containing error metrics for each segment with columns:
+            - "MAE"
+            - "RMSE"
+            - "Bias"
 
         Raises
         ------
@@ -209,8 +284,28 @@ class FloodDamageValidator:
         if segment_col not in df.columns:
             raise ValueError(f"Column '{segment_col}' not found in dataset.")
         
-        grouped = df.groupby(segment_col)[[self.dataset.prediction_column, self.dataset.observed_column]].mean()
-        grouped.columns = ["DR_pred_mean", "DR_obs_mean"]
+        df_pred = df[self.dataset.prediction_column]
+        df_obs = df[self.dataset.observed_column]
+        
+        df["_error"] = df_pred - df_obs
+        df["_abs_error"] = np.abs(df["_error"])
+        df["_squared_error"] = df["_error"] ** 2
+        
+        # https://pandas.pydata.org/pandas-docs/stable/reference/api/pandas.DataFrame.groupby.html
+        # https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.agg.html
+        grouped = (
+            df.groupby(segment_col)
+                .agg(
+                    N = ("_error", "size"),
+                    MAE = ("_abs_error", "mean"),
+                    RMSE = ("_squared_error", lambda x: np.sqrt(np.mean(x))),
+                    Bias = ("_error", "mean"),
+                )
+                .reset_index()
+        )
+        
+        # remove temp cols
+        df.drop(columns=["_error", "_abs_error", "_squared_error"], inplace=True)
         
         return grouped.round(3)
    
@@ -241,6 +336,52 @@ class FloodDamageValidator:
             "RMSE_baseline": rmse_baseline,
             "Bias_baseline": bias_baseline,
         }
+   
+    def plot_depth_monotonicity(self, depth_col="water_depth_m"):
+        """
+        Plot mean observed damage ratio across predefined flood-depth bins.
+
+        Uses depth-bin statistics computed by 'check_monotonicity' and
+        visualises mean observed damage ratios per depth interval.
+
+        Parameters
+        ----------
+        depth_col : str, optional
+            Name of the column containing flood depths. Default is "water_depth_m".
+
+        Raises
+        ------
+        ValueError
+            If the depth column does not exist in the dataset.
+        """
+
+        # Reuse statistics from check_monotonicity (no need to repeat binning logic)
+        stats = self.check_monotonicity(depth_col=depth_col)
+        depth_means = (
+            stats["depth_bin_means"]
+            .reset_index()
+            .rename(columns={self.dataset.observed_column: "mean_damage"})
+        )
+
+        plt.figure(figsize=(8, 5))
+        sns.set_style("whitegrid")
+
+        sns.barplot(
+            data=depth_means,
+            x=depth_means.columns[0],   # depth-bin category
+            y="mean_damage",
+            hue=depth_means.columns[0],          # required to avoid warning
+            palette="Blues",
+            legend=False
+        )
+
+        plt.xlabel("Flood depth interval [m]")
+        plt.ylabel("Mean observed damage ratio")
+        plt.title("Observed Damage Ratio Across Flood-Depth Bins")
+
+        plt.ylim(0, max(depth_means["mean_damage"]) * 1.15)
+        plt.tight_layout()
+        plt.show()
    
     def plot_scatter(self):
         """
@@ -310,21 +451,6 @@ class FloodDamageValidator:
         print(f"Model fit (based on MAE): {quality}")
 
     @staticmethod
-    def print_loss_summary(loss_metrics):
-        """
-        Print a text summary of financial loss metrics.
-
-        Parameters
-        ----------
-        loss_metrics : dict
-            Dictionary as returned by 'compute_loss_metrics'.
-        """
-        print("\nFinancial loss validation:")
-        print(f"MAE loss       : {loss_metrics['MAE_loss']:.3f}")
-        print(f"RMSE loss      : {loss_metrics['RMSE_loss']:.3f}")
-        print(f"Bias loss      : {loss_metrics['Bias_loss']:.3f}")
-
-    @staticmethod
     def print_baseline_summary(baseline_metrics, model_metrics=None):
         """
         Print a summary of baseline performance metrics.
@@ -338,7 +464,7 @@ class FloodDamageValidator:
             show relative improvement in MAE if provided.
         """
 
-        print("\nGlobal baseline metrics (constant DR = mean observed)")
+        print("\nGlobal baseline metrics (constant Damage Ratio = mean observed)")
         print(f"Baseline MAE   : {baseline_metrics['MAE_baseline']:.3f}")
         print(f"Baseline RMSE  : {baseline_metrics['RMSE_baseline']:.3f}")
         print(f"Baseline Bias  : {baseline_metrics['Bias_baseline']:.3f}")
@@ -360,7 +486,7 @@ if __name__ == "__main__":
     print(validation_data.df.head())
     
     validator = FloodDamageValidator(validation_data)
-    print("\n", validator.compute_segment_means("building_type"))
+    print("\n", validator.compute_segment_metrics("building_type"))
     
     # Damage-ratio metrics
     metrics = validator.compute_metrics()
@@ -368,9 +494,6 @@ if __name__ == "__main__":
     validator.print_baseline_summary(baseline_metrics, model_metrics=metrics)
     validator.print_performance_summary(metrics)
     
-    # Financial loss metrics
-    loss_metrics = validator.compute_loss_metrics("replacement_value_kEUR")
-    validator.print_loss_summary(loss_metrics)
-    
     # Scatter plot
+    validator.plot_depth_monotonicity()
     validator.plot_scatter()
